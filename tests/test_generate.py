@@ -2,7 +2,7 @@ import copy
 import io
 from textwrap import dedent
 from typing import Union
-from dataclass_retro_gen.utils import Type, Dataclass
+from dataclass_retro_gen.generate import Type, Dataclass
 
 
 def type_to_str(type: Type, depth: int = 0):
@@ -155,6 +155,7 @@ def test_generate_dataclass_simple():
         dedent(
             """\
             from dataclasses import dataclass
+
             @dataclass
             class Test:
                 pass
@@ -169,6 +170,7 @@ def test_generate_dataclass_flat():
         dedent(
             """\
             from dataclasses import dataclass
+
             @dataclass
             class Test:
                 a: int
@@ -184,9 +186,11 @@ def test_generate_dataclass_1_level():
         dedent(
             """\
             from dataclasses import dataclass
+
             @dataclass
             class C:
                 d: float
+
             @dataclass
             class Test:
                 a: int
@@ -203,9 +207,11 @@ def test_generate_dataclass_1_level_with_list():
         dedent(
             """\
             from dataclasses import dataclass
+
             @dataclass
             class C:
                 d: list[int]
+
             @dataclass
             class Test:
                 a: int
@@ -222,12 +228,15 @@ def test_generate_dataclass_2_level_with_list():
         dedent(
             """\
             from dataclasses import dataclass
-            @dataclass
-            class C:
-                d: list["D"]
+
             @dataclass
             class D:
                 b: int
+
+            @dataclass
+            class C:
+                d: list["D"]
+
             @dataclass
             class Test:
                 a: int
@@ -244,6 +253,7 @@ def test_generate_dataclass_from_simple_list():
         dedent(
             """\
             from dataclasses import dataclass
+
             @dataclass
             class Test:
                 pass
@@ -258,10 +268,30 @@ def test_generate_dataclass_from_list_with_different_types():
         dedent(
             """\
             from dataclasses import dataclass
+
             @dataclass
             class Test:
-                a: str | int
+                a: int | str
                 b: int | None
+            """
+        ),
+    )
+
+
+def test_generate_dataclass_conflict_names():
+    _test_dataclass_code_generation(
+        Dataclass.from_json_dict("a", {"a": {"a": 123}}),
+        dedent(
+            """\
+            from dataclasses import dataclass
+
+            @dataclass
+            class AA:
+                a: int
+
+            @dataclass
+            class A:
+                a: "AA"
             """
         ),
     )

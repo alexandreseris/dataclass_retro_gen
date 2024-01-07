@@ -31,16 +31,30 @@ package-dir = { "" = "src" }
 [tool.ruff]
 target-version = "py310"
 line-length = 120
-exclude = [".pytest_cache", "**/*.egg-info", "**/__pycache__", "venv"]
+exclude = [
+    ".pytest_cache",
+    "**/*.egg-info",
+    "**/__pycache__",
+    "venv",
+    ".ruff_cache",
+    ".mypy_cache",
+]
 
 [tool.black]
+exclude = "\\.pytest_cache|.+\\.egg-info|__pycache__|venv/|\\.ruff_cache|\\.mypy_cache"
 line-length = 120
 target-version = ['py310']
-exclude = "\\.pytest_cache|.+\\.egg-info|__pycache__|venv/"
 
 [tool.mypy]
 python_version = "3.10"
-exclude = ["\\.pytest_cache", ".+\\.egg-info", "__pycache__", "venv/"]
+exclude = [
+    "\\.pytest_cache",
+    ".+\\.egg-info",
+    "__pycache__",
+    "venv/",
+    "\\.ruff_cache",
+    "\\.mypy_cache",
+]
 
 
 [tool.pytest.ini_options]
