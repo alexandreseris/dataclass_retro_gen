@@ -151,7 +151,7 @@ def _test_dataclass_code_generation(dataclass_: Dataclass, code: str):
 
 def test_generate_dataclass_simple():
     _test_dataclass_code_generation(
-        Dataclass.from_json_dict("test", {}),
+        Dataclass.from_mapping("test", {}),
         dedent(
             """\
             from dataclasses import dataclass
@@ -166,7 +166,7 @@ def test_generate_dataclass_simple():
 
 def test_generate_dataclass_flat():
     _test_dataclass_code_generation(
-        Dataclass.from_json_dict("test", {"a": 123, "b": "somestring"}),
+        Dataclass.from_mapping("test", {"a": 123, "b": "somestring"}),
         dedent(
             """\
             from dataclasses import dataclass
@@ -182,7 +182,7 @@ def test_generate_dataclass_flat():
 
 def test_generate_dataclass_1_level():
     _test_dataclass_code_generation(
-        Dataclass.from_json_dict("test", {"a": 123, "b": "somestring", "c": {"d": 1.2}}),
+        Dataclass.from_mapping("test", {"a": 123, "b": "somestring", "c": {"d": 1.2}}),
         dedent(
             """\
             from dataclasses import dataclass
@@ -203,14 +203,15 @@ def test_generate_dataclass_1_level():
 
 def test_generate_dataclass_1_level_with_list():
     _test_dataclass_code_generation(
-        Dataclass.from_json_dict("test", {"a": 123, "b": "somestring", "c": {"d": [1, 2, 3]}}),
+        Dataclass.from_mapping("test", {"a": 123, "b": "somestring", "c": {"d": [1, 2, 3]}}),
         dedent(
             """\
             from dataclasses import dataclass
+            from typing import Sequence
 
             @dataclass
             class C:
-                d: list[int]
+                d: Sequence[int]
 
             @dataclass
             class Test:
@@ -224,10 +225,11 @@ def test_generate_dataclass_1_level_with_list():
 
 def test_generate_dataclass_2_level_with_list():
     _test_dataclass_code_generation(
-        Dataclass.from_json_dict("test", {"a": 123, "b": "somestring", "c": {"d": [{"b": 123}]}}),
+        Dataclass.from_mapping("test", {"a": 123, "b": "somestring", "c": {"d": [{"b": 123}]}}),
         dedent(
             """\
             from dataclasses import dataclass
+            from typing import Sequence
 
             @dataclass
             class D:
@@ -235,7 +237,7 @@ def test_generate_dataclass_2_level_with_list():
 
             @dataclass
             class C:
-                d: list["D"]
+                d: Sequence["D"]
 
             @dataclass
             class Test:
@@ -249,7 +251,7 @@ def test_generate_dataclass_2_level_with_list():
 
 def test_generate_dataclass_from_simple_list():
     _test_dataclass_code_generation(
-        Dataclass.from_json_dicts("Test", [{}, {}]),
+        Dataclass.from_mappings("Test", [{}, {}]),
         dedent(
             """\
             from dataclasses import dataclass
@@ -264,7 +266,7 @@ def test_generate_dataclass_from_simple_list():
 
 def test_generate_dataclass_from_list_with_different_types():
     _test_dataclass_code_generation(
-        Dataclass.from_json_dicts("Test", [{"a": 2}, {"a": "test", "b": 4}]),
+        Dataclass.from_mappings("Test", [{"a": 2}, {"a": "test", "b": 4}]),
         dedent(
             """\
             from dataclasses import dataclass
@@ -280,7 +282,7 @@ def test_generate_dataclass_from_list_with_different_types():
 
 def test_generate_dataclass_conflict_names():
     _test_dataclass_code_generation(
-        Dataclass.from_json_dict("a", {"a": {"a": 123}}),
+        Dataclass.from_mapping("a", {"a": {"a": 123}}),
         dedent(
             """\
             from dataclasses import dataclass

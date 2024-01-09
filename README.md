@@ -1,6 +1,6 @@
 # Dataclass Generation using Retro engineering
 
-A python library without external dependencies to generate dataclasses from one or several dictionaries
+A python library without external dependencies to generate dataclasses from one or several mappings (like dictionaries)
 
 Can be used to roughly generate classes for an unknown source of data (e.g. an undocummented api or file for instance)
 
@@ -16,8 +16,8 @@ pip install git+https://github.com/alexandreseris/dataclass_retro_gen.git
 from dataclass_retro_gen import Dataclass
 
 with open("some_file_to_save_generated_classes", "w", encoding="utf8") as fs:
-    # you can (and should if you can) also use Dataclass.from_json_dicts to generate better results
-    dataclass_ = Dataclass.from_json_dict("your_class_name", {"some": "dictionnary"})
+    # you can (and should if you can) also use Dataclass.from_mappings to generate better results
+    dataclass_ = Dataclass.from_mapping("your_class_name", {"some": "dictionnary"})
     dataclass_.generate_class_definition(
         buffer=fs,  # you can also use io.StringIO if you prefer
         use_from_import=True,

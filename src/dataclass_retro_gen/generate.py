@@ -4,7 +4,7 @@ import copy
 from dataclasses import dataclass, field
 import keyword
 import types
-from typing import Any, Iterable, Union, cast, get_args, get_origin, Callable, TypeAlias
+from typing import Any, Iterable, Union, cast, get_args, get_origin, Callable, TypeAlias, Mapping, Sequence
 
 
 def guess_json_type(item: Any) -> type | None:
@@ -132,8 +132,8 @@ class Type:
             if len(self.args) > 1 or len(other_type.args) > 1:
                 # only the union type can have several args
                 # but the union cases were managed above
-                # we should only receive list here
-                # and dict is not possible because it should be transformed to dataclass
+                # Mapping is not possible because it should be transformed to dataclass
+                # so we should only receive non str Sequence here
                 raise ValueError(f"something went terrebly wrong: {self} {other_type}")
             self_union_arg = self.get_union_arg()
             other_type_union_arg = other_type.get_union_arg()
@@ -257,13 +257,13 @@ class Dataclass:
         depth: int,
     ) -> Type:
         type = guess_type(item)
-        if type is not None and issubclass(type, dict):
-            field_dataclass = cls._from_json_dict(
+        if type is not None and issubclass(type, Mapping):
+            field_dataclass = cls._from_mapping(
                 name, item, guess_type=guess_type, classnames=classnames, parentname=parentname, depth=depth + 1
             )
             first_type = Type(field_dataclass)
-        elif type is not None and issubclass(type, list):
-            first_type = cls._reduce_list_to_type(
+        elif type is not None and not issubclass(type, str) and issubclass(type, Sequence):
+            first_type = cls._reduce_sequence_to_type(
                 name, item, guess_type=guess_type, classnames=classnames, parentname=parentname, depth=depth + 1
             )
         else:
@@ -271,19 +271,19 @@ class Dataclass:
         return first_type
 
     @classmethod
-    def _reduce_list_to_type(
+    def _reduce_sequence_to_type(
         cls,
         name: str,
-        data_list: list,
+        data_items: Sequence,
         guess_type: GUESS_TYPE_SIGNATURE,
         classnames: set[str],
         parentname: str | None,
         depth: int,
     ):
         first_type = cls._compute_type(
-            name, data_list[0], guess_type=guess_type, classnames=classnames, parentname=parentname, depth=depth + 1
+            name, data_items[0], guess_type=guess_type, classnames=classnames, parentname=parentname, depth=depth + 1
         )
-        for item in data_list[1:]:
+        for item in data_items[1:]:
             first_type.merge(
                 cls._compute_type(
                     name, item, guess_type=guess_type, classnames=classnames, parentname=parentname, depth=depth + 1
@@ -292,7 +292,7 @@ class Dataclass:
         return first_type
 
     def _get_dataclass_types(self) -> "tuple[set[Dataclass], set[type]]":
-        # this could fail if typing got circular references, but that should never happen
+        # this will fail if typing got circular references, but that should never happen
         imports: set[type] = set()
         dataclasses: set[Dataclass] = set()
         for fieldtype in self._fields.values():
@@ -306,10 +306,10 @@ class Dataclass:
         return dataclasses, imports
 
     @classmethod
-    def _from_json_dict(
+    def _from_mapping(
         cls,
         name: str,
-        data: dict[str, Any],
+        data: Mapping[str, Any],
         guess_type: GUESS_TYPE_SIGNATURE,
         classnames: set[str],
         parentname: "str | None",
@@ -329,9 +329,9 @@ class Dataclass:
 
             field_type = Type(python_field_type)
 
-            if python_field_type is not None and issubclass(python_field_type, dict):
+            if python_field_type is not None and issubclass(python_field_type, Mapping):
                 field_type = Type(
-                    cls._from_json_dict(
+                    cls._from_mapping(
                         field_name,
                         field_value,
                         guess_type=guess_type,
@@ -341,9 +341,13 @@ class Dataclass:
                     )
                 )
 
-            elif python_field_type is not None and issubclass(python_field_type, list):
+            elif (
+                python_field_type is not None
+                and not issubclass(python_field_type, str)
+                and issubclass(python_field_type, Sequence)
+            ):
                 if field_value:
-                    reduced_type = cls._reduce_list_to_type(
+                    reduced_type = cls._reduce_sequence_to_type(
                         field_name,
                         field_value,
                         guess_type,
@@ -351,31 +355,31 @@ class Dataclass:
                         parentname=parentname,
                         depth=depth + 1,
                     )
-                    field_type = Type(list, reduced_type)
+                    field_type = Type(Sequence, reduced_type)
 
             dataclass_._add_field(field_name, field_type)
         return dataclass_
 
     @classmethod
-    def from_json_dict(cls, name: str, data: dict[str, Any], guess_type: GUESS_TYPE_SIGNATURE = guess_json_type):
-        return cls._from_json_dict(name, data, guess_type, classnames=set(), parentname=None, depth=0)
+    def from_mapping(cls, name: str, data: Mapping[str, Any], guess_type: GUESS_TYPE_SIGNATURE = guess_json_type):
+        return cls._from_mapping(name, data, guess_type, classnames=set(), parentname=None, depth=0)
 
     @classmethod
-    def from_json_dicts(
-        cls, name: str, data: Iterable[dict[str, Any]], guess_type: GUESS_TYPE_SIGNATURE = guess_json_type
+    def from_mappings(
+        cls, name: str, data: Iterable[Mapping[str, Any]], guess_type: GUESS_TYPE_SIGNATURE = guess_json_type
     ):
         try:
             data_iterator = iter(data)
         except StopIteration:
             raise ValueError("can't generate model without any data line!")
-        first_dict = next(data_iterator)
+        first_mapping = next(data_iterator)
         classnames: set[str] = set()
-        field_dataclass = cls._from_json_dict(
-            name, first_dict, guess_type=guess_type, classnames=classnames, parentname=None, depth=0
+        field_dataclass = cls._from_mapping(
+            name, first_mapping, guess_type=guess_type, classnames=classnames, parentname=None, depth=0
         )
         for item in data_iterator:
             field_dataclass._merge(
-                cls._from_json_dict(name, item, guess_type=guess_type, classnames=classnames, parentname=None, depth=0)
+                cls._from_mapping(name, item, guess_type=guess_type, classnames=classnames, parentname=None, depth=0)
             )
         return field_dataclass
 
