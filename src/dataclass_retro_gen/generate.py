@@ -309,7 +309,7 @@ class Dataclass:
     def _from_json_dict(
         cls,
         name: str,
-        data: dict,
+        data: dict[str, Any],
         guess_type: GUESS_TYPE_SIGNATURE,
         classnames: set[str],
         parentname: "str | None",
@@ -357,18 +357,23 @@ class Dataclass:
         return dataclass_
 
     @classmethod
-    def from_json_dict(cls, name: str, data: dict, guess_type: GUESS_TYPE_SIGNATURE = guess_json_type):
+    def from_json_dict(cls, name: str, data: dict[str, Any], guess_type: GUESS_TYPE_SIGNATURE = guess_json_type):
         return cls._from_json_dict(name, data, guess_type, classnames=set(), parentname=None, depth=0)
 
     @classmethod
-    def from_json_dicts(cls, name: str, data: list[dict], guess_type: GUESS_TYPE_SIGNATURE = guess_json_type):
-        if not data:
-            raise ValueError("can't generate model from empty list!")
+    def from_json_dicts(
+        cls, name: str, data: Iterable[dict[str, Any]], guess_type: GUESS_TYPE_SIGNATURE = guess_json_type
+    ):
+        try:
+            data_iterator = iter(data)
+        except StopIteration:
+            raise ValueError("can't generate model without any data line!")
+        first_dict = next(data_iterator)
         classnames: set[str] = set()
         field_dataclass = cls._from_json_dict(
-            name, data[0], guess_type=guess_type, classnames=classnames, parentname=None, depth=0
+            name, first_dict, guess_type=guess_type, classnames=classnames, parentname=None, depth=0
         )
-        for item in data[1:]:
+        for item in data_iterator:
             field_dataclass._merge(
                 cls._from_json_dict(name, item, guess_type=guess_type, classnames=classnames, parentname=None, depth=0)
             )
