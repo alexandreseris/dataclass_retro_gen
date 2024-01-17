@@ -297,3 +297,19 @@ def test_generate_dataclass_conflict_names():
             """
         ),
     )
+
+
+def test_generate_dataclass_aliases():
+    _test_dataclass_code_generation(
+        Dataclass.from_mapping("test", {"A": 123, "B": "somestring"}),
+        dedent(
+            """\
+            from dataclasses import dataclass
+
+            @dataclass
+            class Test:
+                a: int  # ALIAS = A
+                b: str  # ALIAS = B
+            """
+        ),
+    )

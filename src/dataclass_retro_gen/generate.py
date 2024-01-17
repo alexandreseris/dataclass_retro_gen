@@ -25,14 +25,14 @@ def guess_json_type(item: Any) -> type | None:
     raise ValueError(f"unknown type {type(item)} for {item}")
 
 
-def generate_class_name(json_name: str) -> str:
+def def_generate_class_name(json_name: str) -> str:
     json_name = json_name[0].upper() + json_name[1:]
     while json_name in keyword.kwlist:
         json_name += "_"
     return json_name
 
 
-def generate_field_name(json_name: str) -> str:
+def def_generate_field_name(json_name: str) -> str:
     json_name = json_name[0].lower() + json_name[1:]
     while json_name in keyword.kwlist:
         json_name += "_"
@@ -193,6 +193,16 @@ class Type:
             return f"{self.origin_type_name()}[{args_str}]"
 
 
+@dataclass
+class Field:
+    name: str
+    alias: str | None
+    type: Type
+
+    def __hash__(self) -> int:
+        return hash(self.name)
+
+
 def generate_code(dataclasses: set["Dataclass"], imports: set[type], use_from_import: bool, use_typing_union: bool):
     code_buffer = io.StringIO()
     imports.add(cast(type, dataclass))
@@ -209,42 +219,56 @@ def generate_code(dataclasses: set["Dataclass"], imports: set[type], use_from_im
         if not dataclass_._fields:
             code_buffer.write("    pass\n")
             continue
-        for fieldname, fieldtype in dataclass_._fields.items():
-            code_buffer.write(f"    {fieldname}: {fieldtype.to_string(use_typing_union)}\n")
+        for field_ in dataclass_._fields.values():
+            code_buffer.write(f"    {field_.name}: {field_.type.to_string(use_typing_union)}")
+            if field_.alias is not None:
+                code_buffer.write(f"  # ALIAS = {field_.alias}")
+            code_buffer.write("\n")
     return code_buffer.getvalue()
 
 
 GUESS_TYPE_SIGNATURE: TypeAlias = Callable[[Any], type | None]
+GENERATE_CLASS_NAME_SIGNATURE: TypeAlias = Callable[[str], str]
+GENERATE_FIELD_NAME_SIGNATURE: TypeAlias = Callable[[str], str]
 
 
 @dataclass
 class Dataclass:
     _name: str
-    _fields: dict[str, Type] = field(default_factory=dict)
+    _fields: dict[str, Field] = field(default_factory=dict)
     _depth: int = field(default=0)
 
     def __hash__(self) -> int:
         return hash(self._name)
 
-    def _merge(self, dataclass_: "Dataclass") -> None:
+    def _merge(self, dataclass_: "Dataclass", generate_field_name: GENERATE_FIELD_NAME_SIGNATURE) -> None:
         if self._name != dataclass_._name:
             raise ValueError(f"cant merge two Dataclass with different names ({self._name} and {dataclass_._name})")
         for fieldname in self._fields:
             if fieldname in dataclass_._fields:
-                self._fields[fieldname].merge(dataclass_._fields[fieldname])
+                self._fields[fieldname].type.merge(dataclass_._fields[fieldname].type)
         for fieldname in dataclass_._fields:
             if fieldname not in self._fields:
-                dataclass_._fields[fieldname].merge(Type(None))
-                self._add_field(fieldname, dataclass_._fields[fieldname], skip_name_generate=True)
+                dataclass_._fields[fieldname].type.merge(Type(None))
+                self._add_field(
+                    fieldname, dataclass_._fields[fieldname].type, generate_field_name, skip_name_generate=True
+                )
 
-    def _add_field(self, name: str, type: Type, skip_name_generate: bool = False) -> None:
+    def _add_field(
+        self,
+        name: str,
+        type: Type,
+        generate_field_name: GENERATE_FIELD_NAME_SIGNATURE,
+        skip_name_generate: bool = False,
+    ) -> None:
+        alias = None
         if skip_name_generate:
             fieldname = name
         else:
             fieldname = generate_field_name(name)
             if fieldname != name:
-                print(f"WARN - {name} of {self._name} has been aliased to {fieldname}")
-        self._fields[fieldname] = type
+                alias = name
+        self._fields[fieldname] = Field(fieldname, alias, type)
 
     @classmethod
     def _compute_type(
@@ -252,6 +276,8 @@ class Dataclass:
         name: str,
         item: Any,
         guess_type: GUESS_TYPE_SIGNATURE,
+        generate_class_name: GENERATE_CLASS_NAME_SIGNATURE,
+        generate_field_name: GENERATE_FIELD_NAME_SIGNATURE,
         classnames: set[str],
         parentname: str | None,
         depth: int,
@@ -259,12 +285,26 @@ class Dataclass:
         type = guess_type(item)
         if type is not None and issubclass(type, Mapping):
             field_dataclass = cls._from_mapping(
-                name, item, guess_type=guess_type, classnames=classnames, parentname=parentname, depth=depth + 1
+                name,
+                item,
+                guess_type=guess_type,
+                classnames=classnames,
+                parentname=parentname,
+                depth=depth + 1,
+                generate_class_name=generate_class_name,
+                generate_field_name=generate_field_name,
             )
             first_type = Type(field_dataclass)
         elif type is not None and not issubclass(type, str) and issubclass(type, Sequence):
             first_type = cls._reduce_sequence_to_type(
-                name, item, guess_type=guess_type, classnames=classnames, parentname=parentname, depth=depth + 1
+                name,
+                item,
+                guess_type=guess_type,
+                classnames=classnames,
+                parentname=parentname,
+                depth=depth + 1,
+                generate_class_name=generate_class_name,
+                generate_field_name=generate_field_name,
             )
         else:
             first_type = Type(type)
@@ -276,17 +316,33 @@ class Dataclass:
         name: str,
         data_items: Sequence,
         guess_type: GUESS_TYPE_SIGNATURE,
+        generate_class_name: GENERATE_CLASS_NAME_SIGNATURE,
+        generate_field_name: GENERATE_FIELD_NAME_SIGNATURE,
         classnames: set[str],
         parentname: str | None,
         depth: int,
     ):
         first_type = cls._compute_type(
-            name, data_items[0], guess_type=guess_type, classnames=classnames, parentname=parentname, depth=depth + 1
+            name,
+            data_items[0],
+            guess_type=guess_type,
+            classnames=classnames,
+            parentname=parentname,
+            depth=depth + 1,
+            generate_class_name=generate_class_name,
+            generate_field_name=generate_field_name,
         )
         for item in data_items[1:]:
             first_type.merge(
                 cls._compute_type(
-                    name, item, guess_type=guess_type, classnames=classnames, parentname=parentname, depth=depth + 1
+                    name,
+                    item,
+                    guess_type=guess_type,
+                    classnames=classnames,
+                    parentname=parentname,
+                    depth=depth + 1,
+                    generate_class_name=generate_class_name,
+                    generate_field_name=generate_field_name,
                 )
             )
         return first_type
@@ -295,8 +351,8 @@ class Dataclass:
         # this will fail if typing got circular references, but that should never happen
         imports: set[type] = set()
         dataclasses: set[Dataclass] = set()
-        for fieldtype in self._fields.values():
-            sub_dataclasses, other_non_builtins = fieldtype.get_dependencies_types()
+        for field_ in self._fields.values():
+            sub_dataclasses, other_non_builtins = field_.type.get_dependencies_types()
             imports.update(other_non_builtins)
             dataclasses.update(sub_dataclasses)
         for dataclass_field in dataclasses.copy():
@@ -311,6 +367,8 @@ class Dataclass:
         name: str,
         data: Mapping[str, Any],
         guess_type: GUESS_TYPE_SIGNATURE,
+        generate_class_name: GENERATE_CLASS_NAME_SIGNATURE,
+        generate_field_name: GENERATE_FIELD_NAME_SIGNATURE,
         classnames: set[str],
         parentname: "str | None",
         depth: int,
@@ -335,6 +393,8 @@ class Dataclass:
                         field_name,
                         field_value,
                         guess_type=guess_type,
+                        generate_class_name=generate_class_name,
+                        generate_field_name=generate_field_name,
                         classnames=classnames,
                         parentname=classname,
                         depth=depth + 1,
@@ -354,19 +414,42 @@ class Dataclass:
                         classnames=classnames,
                         parentname=parentname,
                         depth=depth + 1,
+                        generate_class_name=generate_class_name,
+                        generate_field_name=generate_field_name,
                     )
                     field_type = Type(Sequence, reduced_type)
 
-            dataclass_._add_field(field_name, field_type)
+            dataclass_._add_field(field_name, field_type, generate_field_name)
         return dataclass_
 
     @classmethod
-    def from_mapping(cls, name: str, data: Mapping[str, Any], guess_type: GUESS_TYPE_SIGNATURE = guess_json_type):
-        return cls._from_mapping(name, data, guess_type, classnames=set(), parentname=None, depth=0)
+    def from_mapping(
+        cls,
+        name: str,
+        data: Mapping[str, Any],
+        guess_type: GUESS_TYPE_SIGNATURE = guess_json_type,
+        generate_class_name: GENERATE_CLASS_NAME_SIGNATURE = def_generate_class_name,
+        generate_field_name: GENERATE_FIELD_NAME_SIGNATURE = def_generate_field_name,
+    ):
+        return cls._from_mapping(
+            name,
+            data,
+            guess_type,
+            classnames=set(),
+            parentname=None,
+            depth=0,
+            generate_class_name=generate_class_name,
+            generate_field_name=generate_field_name,
+        )
 
     @classmethod
     def from_mappings(
-        cls, name: str, data: Iterable[Mapping[str, Any]], guess_type: GUESS_TYPE_SIGNATURE = guess_json_type
+        cls,
+        name: str,
+        data: Iterable[Mapping[str, Any]],
+        guess_type: GUESS_TYPE_SIGNATURE = guess_json_type,
+        generate_class_name: GENERATE_CLASS_NAME_SIGNATURE = def_generate_class_name,
+        generate_field_name: GENERATE_FIELD_NAME_SIGNATURE = def_generate_field_name,
     ):
         try:
             data_iterator = iter(data)
@@ -375,11 +458,28 @@ class Dataclass:
         first_mapping = next(data_iterator)
         classnames: set[str] = set()
         field_dataclass = cls._from_mapping(
-            name, first_mapping, guess_type=guess_type, classnames=classnames, parentname=None, depth=0
+            name,
+            first_mapping,
+            guess_type=guess_type,
+            classnames=classnames,
+            parentname=None,
+            depth=0,
+            generate_class_name=generate_class_name,
+            generate_field_name=generate_field_name,
         )
         for item in data_iterator:
             field_dataclass._merge(
-                cls._from_mapping(name, item, guess_type=guess_type, classnames=classnames, parentname=None, depth=0)
+                cls._from_mapping(
+                    name,
+                    item,
+                    guess_type=guess_type,
+                    classnames=classnames,
+                    parentname=None,
+                    depth=0,
+                    generate_class_name=generate_class_name,
+                    generate_field_name=generate_field_name,
+                ),
+                generate_field_name,
             )
         return field_dataclass
 
