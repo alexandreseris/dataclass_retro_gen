@@ -1,1 +1,6 @@
-from dataclass_retro_gen.generate import Dataclass  # noqa: F401
+from dataclass_retro_gen.generate import NamePath as NamePath
+from dataclass_retro_gen.generate import RawScalars as RawScalars
+from dataclass_retro_gen.generate import ScalarValue as ScalarValue
+from dataclass_retro_gen.generate import Settings as Settings
+from dataclass_retro_gen.generate import parse_unstructured_data as parse_unstructured_data
+from dataclass_retro_gen.generate import parse_unstructured_data_async as parse_unstructured_data_async
