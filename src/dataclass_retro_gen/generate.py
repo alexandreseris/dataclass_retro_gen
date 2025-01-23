@@ -261,6 +261,11 @@ class NamePath:
         self.root = root
         self.path = path or []
 
+    def __repr__(self) -> str:
+        if self.path:
+            return f"{self.root} => {'/'.join(self.path)}"
+        return self.root
+
     def __hash__(self) -> int:
         return hash(type(self)) + hash(self.root) + hash(tuple(self.path))
 
@@ -313,6 +318,9 @@ class ScalarType:
         if self.type.__module__ == "builtins":
             return self.type.__name__
         return f"{self.type.__module__}.{self.type.__name__}"
+
+    def __repr__(self) -> str:
+        return self.to_string(Settings)  # type: ignore[type-abstract]
 
     def to_python_varname(self, settings: type[Settings]) -> str:
         return self.type.__name__
@@ -376,10 +384,41 @@ class Union:
             return
         if (self_literal_lookup := self.get_literal()) and (isinstance(type, Literal)):
             self_literal_lookup.merge(type)
+            return
+        for ind, selftype in enumerate(self.types):
+            if selftype == type:
+                self.types[ind] = cast(UnionMember, selftype.merge_with_field_type(type))
+                return
         self.types.append(type)
 
+    def get_sequence(self) -> "Sequence | None":
+        for typ in self.types:
+            if isinstance(typ, Sequence):
+                return typ
+        return None
+
     def merge(self, other: "Union") -> None:
-        self.types.extend(other.types)
+        self_seq = None
+        other_seq = None
+        new_types: UniqueList[UnionMember] = UniqueList()
+        for typ in self.types:
+            if isinstance(typ, Sequence):
+                self_seq = typ
+            else:
+                new_types.append(typ)
+        for typ in other.types:
+            if isinstance(typ, Sequence):
+                other_seq = typ
+            else:
+                new_types.append(typ)
+        if self_seq is not None and other_seq is not None:
+            self_seq.merge(other_seq)
+            new_types.append(self_seq)
+        elif self_seq is not None:
+            new_types.append(self_seq)
+        elif other_seq is not None:
+            new_types.append(other_seq)
+        self.types = new_types
 
     def merge_with_field_type(self, other: FieldType) -> FieldType:
         if isinstance(other, ScalarType):
@@ -397,6 +436,9 @@ class Union:
 
     def to_string(self, settings: type[Settings]) -> str:
         return " | ".join(x.to_string(settings) for x in self.types)
+
+    def __repr__(self) -> str:
+        return self.to_string(Settings)  # type: ignore[type-abstract]
 
     def to_python_varname(self, settings: type[Settings]) -> str:
         return f"Union_{'__'.join(x.to_python_varname(settings) for x in self.types)}"
@@ -478,6 +520,9 @@ class Literal:
 
     def to_string(self, settings: type[Settings]) -> str:
         return f"typing.Literal[{', '.join(repr(x) for x in self.values)}]"
+
+    def __repr__(self) -> str:
+        return self.to_string(Settings)  # type: ignore[type-abstract]
 
     def to_python_varname(self, settings: type[Settings]) -> str:
         value_strs = []
@@ -598,13 +643,16 @@ class Sequence:
             found_types.append(strucure)
         if sequence:
             found_types.append(sequence)
-        # empty list
+        # empty list, TODO: should handle that better
         if not found_types:
             return None
         return Sequence(reduce(lambda x, y: x.merge_with_field_type(y), found_types))
 
     def to_string(self, settings: type[Settings]) -> str:
         return f"collections.abc.Sequence[{self.type.to_string(settings)}]"
+
+    def __repr__(self) -> str:
+        return self.to_string(Settings)  # type: ignore[type-abstract]
 
     def to_python_varname(self, settings: type[Settings]) -> str:
         return f"Sequence_{self.type.to_python_varname(settings)}"
@@ -661,6 +709,9 @@ class Field:
             return True
         return False
 
+    def __repr__(self) -> str:
+        return f"{self.name}: {repr(self.type)}"
+
 
 class Structure:
     def __init__(self, path: NamePath, fields: dict[str, Field], depth: int) -> None:
@@ -698,12 +749,16 @@ class Structure:
         return cls(path, fields, depth)
 
     def merge(self, other: "Structure") -> None:
-        # merge common keys
         for key in self.fields:
+            # merge common keys
             if key in other.fields:
-                self.fields[key].type.merge_with_field_type(other.fields[key].type)
-        # add missing keys as optional
+                new_type = self.fields[key].type.merge_with_field_type(other.fields[key].type)
+                self.fields[key].type = new_type
+            # self has key but not other
+            else:
+                self.fields[key].add_null()
         for key in other.fields:
+            # other has key but not self
             if key not in self.fields:
                 other_field = other.fields[key]
                 other_field.add_null()
@@ -725,6 +780,9 @@ class Structure:
 
     def to_string(self, settings: type[Settings]) -> str:
         return settings.generate_class_name(self.path)
+
+    def __repr__(self) -> str:
+        return self.to_string(Settings)  # type: ignore[type-abstract]
 
     def to_python_varname(self, settings: type[Settings]) -> str:
         return settings.generate_class_name(self.path)
@@ -938,10 +996,11 @@ except ValueError:
 """
                 type_str = union.to_string(self.settings)
                 convert_lines: list[str] = []
+                has_None = False
                 for type in union.types:
                     if isinstance(type, ScalarType):
                         if type.is_none():
-                            convert_lines.append(none_expr)
+                            has_None = True
                             continue
                         else:
                             sub_function_name = f"extract_{type.to_python_varname(self.settings)}"
@@ -954,6 +1013,8 @@ except ValueError:
                     elif isinstance(type, Union):
                         sub_function_name = generate_union_extract_def(type)
                     convert_lines.append(sub_function_expr.format(sub_function_name=sub_function_name))
+                if has_None:
+                    convert_lines.insert(0, none_expr)
                 convert_lines_expr_strs = "".join(indent(x, " " * 4) for x in convert_lines)
                 generate_extract_functions_strs.append(
                     f"""\
@@ -1054,6 +1115,7 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                 source = "\n".join(source.splitlines()[1:])
                 code_buffer.write(source + "\n")
             for s in generate_extract_functions_strs:
+                code_buffer.write("\n")
                 code_buffer.write(s)
 
 
