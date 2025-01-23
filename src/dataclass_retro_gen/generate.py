@@ -974,7 +974,7 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                     dedent(
                         f"""\
                         def {function_name}(value: typing.Any) -> "{type_str}":
-                            if not isinstance(value, typing.Mapping):
+                            if not isinstance(value, typing.MutableMapping):
                                 raise ValueError(f"unepected type: {{type(value).__name__}}")
                             return {type_str}.from_dict(value)
                         """
@@ -1027,9 +1027,9 @@ def {function_name}(value: typing.Any) -> "{type_str}":
 
             code_buffer.write("    @classmethod\n")
             code_buffer.write(
-                "    def from_dict(cls, data: typing.Mapping[str, typing.Any]) -> typing_extensions.Self:\n"
+                "    def from_dict(cls, data: typing.MutableMapping[str, typing.Any]) -> typing_extensions.Self:\n"
             )
-            code_buffer.write("        return cls(\n")
+            code_buffer.write("        obj = cls(\n")
             for field in struct.fields.values():
                 field_name = self.settings.generate_class_attribute_name(field.name)
                 dict_fieldname = field.name
@@ -1037,29 +1037,36 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                     if field.type.is_none():
                         # mypy does not allow to save the return of a function returning None
                         code_buffer.write(
-                            f'{field_indent}{field_name}=None if check_for_None(data["{dict_fieldname}"]) else None,\n'
+                            f'{field_indent}{field_name}=None if check_for_None(data.pop("{dict_fieldname}", None)) else None,\n'
                         )
                     else:
                         function_name = f"extract_{field.type.to_python_varname(self.settings)}"
-                        code_buffer.write(f'{field_indent}{field_name}={function_name}(data["{dict_fieldname}"]),\n')
+                        code_buffer.write(
+                            f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n'
+                        )
                 elif isinstance(field.type, Literal):
                     function_name = generate_literal_extract_def(field.type)
-                    code_buffer.write(f'{field_indent}{field_name}={function_name}(data["{dict_fieldname}"]),\n')
+                    code_buffer.write(f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n')
                 elif isinstance(field.type, Union):
                     function_name = generate_union_extract_def(field.type)
                     if field.type.has_nullable():
                         code_buffer.write(
-                            f'{field_indent}{field_name}={function_name}(data.get("{dict_fieldname}")),\n'
+                            f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}", None)),\n'
                         )
                     else:
-                        code_buffer.write(f'{field_indent}{field_name}={function_name}(data["{dict_fieldname}"]),\n')
+                        code_buffer.write(
+                            f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n'
+                        )
                 elif isinstance(field.type, Structure):
                     function_name = generate_structure_extract_def(field.type)
-                    code_buffer.write(f'{field_indent}{field_name}={function_name}(data["{dict_fieldname}"]),\n')
+                    code_buffer.write(f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n')
                 elif isinstance(field.type, Sequence):
                     function_name = generate_sequence_extract_def(field.type)
-                    code_buffer.write(f'{field_indent}{field_name}={function_name}(data["{dict_fieldname}"]),\n')
+                    code_buffer.write(f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n')
             code_buffer.write("        )\n")
+            code_buffer.write("        if len(data) > 0:\n")
+            code_buffer.write("            raise ValueError('remaining field', data)\n")
+            code_buffer.write("        return obj\n")
             code_buffer.write("\n\n")
         if generate_from_dict_methods:
             extract_defs = dedent(
