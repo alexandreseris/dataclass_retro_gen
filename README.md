@@ -19,7 +19,7 @@ parse_result = parse_unstructured_data("root_key_name_of_your_choice", {"some": 
 with open("some_file_to_save_generated_classes", "w", encoding="utf8") as fs:
     parse_result.write_definitions(
         code_buffer=fs,  # you can also use io.StringIO if you prefer
-        generate_from_dict_methods=True, # use this flag to generate a simple from_dict class method
+        generate_from_mapping_methods=True, # use this flag to generate a simple from_mapping class method
     )
 ```
 
