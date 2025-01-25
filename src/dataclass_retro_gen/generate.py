@@ -862,10 +862,11 @@ class ParseResult:
                     field_type = bool_conversion
                 field_type_str = field_type.to_string(self.settings).replace('"', '\\"')
                 field_name = self.settings.generate_class_attribute_name(field.name)
+                mapping_key = ""
                 if field.name != field_name:
-                    code_buffer.write(f'    {field_name}: "{field_type_str}  # ALIAS OF {field.name}"\n')
-                else:
-                    code_buffer.write(f'    {field_name}: "{field_type_str}"\n')
+                    field_name_escaped = repr(field.name).replace('"', '\\"')
+                    mapping_key = f'{{"mapping_key": "{field_name_escaped}"}}'
+                code_buffer.write(f'    {field_name}: "{field_type_str}" = dataclasses.field({mapping_key})\n')
             if not generate_from_mapping_methods:
                 code_buffer.write("\n\n")
                 continue
