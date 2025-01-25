@@ -1,6 +1,7 @@
 import datetime
 import functools
 import io
+import keyword
 from collections.abc import AsyncIterable, Callable, Iterable, Mapping
 from collections.abc import Sequence as TypingSequence
 from dataclasses import dataclass
@@ -37,19 +38,29 @@ class Settings(Protocol):
             str: the class name
         """
         if not namepath._path:
-            return namepath._root.capitalize()
-        return f"{namepath._root.capitalize()}_{'_'.join(x.capitalize() for x in namepath._path)}"
+            classname = namepath._root.capitalize()
+        else:
+            classname = f"{namepath._root.capitalize()}_{'_'.join(x.capitalize() for x in namepath._path)}"
+        if keyword.iskeyword(classname):
+            classname = f"{classname}_"
+        if classname[0].isdigit():
+            classname = f"_{classname}"
+        return classname
 
     @staticmethod
     def generate_class_attribute_name(keyname: str) -> str:
-        """Generate a class attribute name from the dictionnary key
+        """Generate a class attribute name from the mapping key
 
         Args:
-            attrname (str): the dictionnary key
+            keyname (str): the mapping key
 
         Returns:
             str: the generated attribute name
         """
+        if keyword.iskeyword(keyname):
+            keyname = f"{keyname}_"
+        if keyname[0].isdigit():
+            keyname = f"_{keyname}"
         return keyname
 
     @staticmethod
@@ -377,7 +388,7 @@ class ScalarType:
     def __repr__(self) -> str:
         return self.to_string(DefaultSettings)
 
-    def to_python_varname(self, settings: type[Settings]) -> str:
+    def to_python_varname(self, settings: type[Settings], valuepath: NamePath) -> str:
         return self.type.__name__
 
     def get_dependencies_types(self) -> "tuple[UniqueList[Structure], UniqueList[type]]":
@@ -497,8 +508,8 @@ class Union:
     def __repr__(self) -> str:
         return self.to_string(DefaultSettings)
 
-    def to_python_varname(self, settings: type[Settings]) -> str:
-        return f"Union_{'__'.join(x.to_python_varname(settings) for x in self.types)}"
+    def to_python_varname(self, settings: type[Settings], valuepath: NamePath) -> str:
+        return f"Union_{'__'.join(x.to_python_varname(settings, valuepath) for x in self.types)}"
 
     def get_dependencies_types(self) -> "tuple[UniqueList[Structure], UniqueList[type]]":
         structs: UniqueList[Structure] = UniqueList()
@@ -590,25 +601,9 @@ class Literal:
     def __repr__(self) -> str:
         return self.to_string(DefaultSettings)
 
-    def to_python_varname(self, settings: type[Settings]) -> str:
-        value_strs = []
-        for v in self.values:
-            if isinstance(v, datetime.datetime):
-                value_strs.append(
-                    v.isoformat()
-                    .replace("-", "_")
-                    .replace(":", "_")
-                    .replace(".", "_")
-                    .replace("+", "p")
-                    .replace("-", "m")
-                )
-            elif isinstance(v, datetime.date):
-                value_strs.append(v.isoformat().replace("-", "_"))
-            elif isinstance(v, datetime.time):
-                value_strs.append(v.isoformat().replace(":", "_").replace(".", "_"))
-            else:
-                value_strs.append(str(v))
-        return f"Literal_{'__'.join(value_strs)}"
+    def to_python_varname(self, settings: type[Settings], valuepath: NamePath) -> str:
+        valuepath_str = settings.generate_class_name(valuepath)
+        return f"Literal_{valuepath_str}"
 
     def get_dependencies_types(self) -> "tuple[UniqueList[Structure], UniqueList[type]]":
         structs: UniqueList[Structure] = UniqueList()
@@ -715,7 +710,7 @@ class Sequence:
             found_types.append(strucure)
         if sequence:
             found_types.append(sequence)
-        # empty list, TODO: should handle that better
+        # empty sequence, TODO: should handle that better
         if not found_types:
             return None
         return Sequence(reduce(lambda x, y: x.merge_with_field_type(y), found_types))
@@ -726,8 +721,8 @@ class Sequence:
     def __repr__(self) -> str:
         return self.to_string(DefaultSettings)
 
-    def to_python_varname(self, settings: type[Settings]) -> str:
-        return f"Sequence_{self.type.to_python_varname(settings)}"
+    def to_python_varname(self, settings: type[Settings], valuepath: NamePath) -> str:
+        return f"Sequence_{self.type.to_python_varname(settings, valuepath)}"
 
     def get_dependencies_types(self) -> "tuple[UniqueList[Structure], UniqueList[type]]":
         structs: UniqueList[Structure] = UniqueList()
@@ -863,7 +858,7 @@ class Structure:
     def __repr__(self) -> str:
         return self.to_string(DefaultSettings)
 
-    def to_python_varname(self, settings: type[Settings]) -> str:
+    def to_python_varname(self, settings: type[Settings], valuepath: NamePath) -> str:
         return settings.generate_class_name(self.structpath)
 
     def get_dependencies_types(self) -> "tuple[UniqueList[Structure], UniqueList[type]]":
@@ -943,20 +938,20 @@ class ParseResult:
                 if isinstance(field.type, Literal) and (bool_conversion := field.type.convert_bool_literal_to_scalar()):
                     field_type = bool_conversion
                 field_type_str = field_type.to_string(self._settings).replace('"', '\\"')
-                field_name = self._settings.generate_class_attribute_name(field.name)
+                attrname = self._settings.generate_class_attribute_name(field.name)
                 mapping_key = ""
-                if field.name != field_name:
+                if field.name != attrname:
                     field_name_escaped = repr(field.name).replace('"', '\\"')
                     mapping_key = f'{{"mapping_key": "{field_name_escaped}"}}'
-                code_buffer.write(f'    {field_name}: "{field_type_str}" = dataclasses.field({mapping_key})\n')
+                code_buffer.write(f'    {attrname}: "{field_type_str}" = dataclasses.field({mapping_key})\n')
             if not generate_from_mapping_methods:
                 code_buffer.write("\n\n")
                 continue
 
             field_indent = "            "
 
-            def generate_literal_extract_def(literal: Literal) -> str:
-                function_name = f"extract_{literal.to_python_varname(self._settings)}"
+            def generate_literal_extract_def(literal: Literal, valuepath: NamePath) -> str:
+                function_name = f"extract_{literal.to_python_varname(self._settings, valuepath)}"
                 type_str = literal.to_string(self._settings)
                 literal_values = literal.values
                 has_datetime = False
@@ -1007,8 +1002,8 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                 )
                 return function_name
 
-            def generate_sequence_extract_def(sequence: Sequence) -> str:
-                function_name = f"extract_{sequence.to_python_varname(self._settings)}"
+            def generate_sequence_extract_def(sequence: Sequence, valuepath: NamePath) -> str:
+                function_name = f"extract_{sequence.to_python_varname(self._settings, valuepath)}"
                 type_str = sequence.to_string(self._settings)
 
                 if isinstance(sequence.type, ScalarType):
@@ -1028,19 +1023,21 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                         )
                         return function_name
                     else:
-                        inner_function_type_extract = f"extract_{sequence.type.to_python_varname(self._settings)}"
+                        inner_function_type_extract = (
+                            f"extract_{sequence.type.to_python_varname(self._settings, valuepath)}"
+                        )
                         function_call = f"{inner_function_type_extract}(x)"
                 elif isinstance(sequence.type, Literal):
-                    inner_function_type_extract = generate_literal_extract_def(sequence.type)
+                    inner_function_type_extract = generate_literal_extract_def(sequence.type, valuepath)
                     function_call = f"{inner_function_type_extract}(x)"
                 elif isinstance(sequence.type, Sequence):
-                    inner_function_type_extract = generate_sequence_extract_def(sequence.type)
+                    inner_function_type_extract = generate_sequence_extract_def(sequence.type, valuepath)
                     function_call = f"{inner_function_type_extract}(x, check_for_remaining_keys)"
                 elif isinstance(sequence.type, Structure):
-                    inner_function_type_extract = generate_structure_extract_def(sequence.type)
+                    inner_function_type_extract = generate_structure_extract_def(sequence.type, valuepath)
                     function_call = f"{inner_function_type_extract}(x, check_for_remaining_keys)"
                 elif isinstance(sequence.type, Union):
-                    inner_function_type_extract = generate_union_extract_def(sequence.type)
+                    inner_function_type_extract = generate_union_extract_def(sequence.type, valuepath)
                     function_call = f"{inner_function_type_extract}(x, check_for_remaining_keys)"
                 else:
                     assert_never(sequence.type)
@@ -1057,8 +1054,8 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                 )
                 return function_name
 
-            def generate_structure_extract_def(structure: Structure) -> str:
-                function_name = f"extract_{structure.to_python_varname(self._settings)}"
+            def generate_structure_extract_def(structure: Structure, valuepath: NamePath) -> str:
+                function_name = f"extract_{structure.to_python_varname(self._settings, valuepath)}"
                 type_str = structure.to_string(self._settings)
                 generate_extract_functions_strs.append(
                     dedent(
@@ -1072,8 +1069,8 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                 )
                 return function_name
 
-            def generate_union_extract_def(union: Union) -> str:
-                function_name = f"extract_{union.to_python_varname(self._settings)}"
+            def generate_union_extract_def(union: Union, valuepath: NamePath) -> str:
+                function_name = f"extract_{union.to_python_varname(self._settings, valuepath)}"
                 none_expr = """\
 if value is None:
     return None
@@ -1093,16 +1090,16 @@ except ValueError:
                             has_None = True
                             continue
                         else:
-                            sub_function_name = f"extract_{type.to_python_varname(self._settings)}"
+                            sub_function_name = f"extract_{type.to_python_varname(self._settings, valuepath)}"
                             function_call = f"{sub_function_name}(value)"
                     elif isinstance(type, Literal):
-                        sub_function_name = generate_literal_extract_def(type)
+                        sub_function_name = generate_literal_extract_def(type, valuepath)
                         function_call = f"{sub_function_name}(value)"
                     elif isinstance(type, Sequence):
-                        sub_function_name = generate_sequence_extract_def(type)
+                        sub_function_name = generate_sequence_extract_def(type, valuepath)
                         function_call = f"{sub_function_name}(value, check_for_remaining_keys)"
                     elif isinstance(type, Structure):
-                        sub_function_name = generate_structure_extract_def(type)
+                        sub_function_name = generate_structure_extract_def(type, valuepath)
                         function_call = f"{sub_function_name}(value, check_for_remaining_keys)"
                     elif isinstance(type, Union):
                         sub_function_name = generate_union_extract_def(type)
@@ -1128,39 +1125,40 @@ def {function_name}(value: typing.Any, check_for_remaining_keys: bool) -> "{type
             )
             code_buffer.write("        obj = cls(\n")
             for field in struct.fields.values():
-                field_name = self._settings.generate_class_attribute_name(field.name)
-                dict_fieldname = field.name
+                attrname = self._settings.generate_class_attribute_name(field.name)
+                mapping_fieldname = field.name
+                field_path = struct.structpath._add_path(attrname)
                 if isinstance(field.type, ScalarType):
                     if field.type.is_none():
                         # mypy does not allow to save the return of a function returning None
                         code_buffer.write(
-                            f'{field_indent}{field_name}=None if check_for_None(data.pop("{dict_fieldname}", None)) else None,\n'
+                            f'{field_indent}{attrname}=None if check_for_None(data.pop("{mapping_fieldname}", None)) else None,\n'
                         )
                     else:
-                        function_name = f"extract_{field.type.to_python_varname(self._settings)}"
+                        function_name = f"extract_{field.type.to_python_varname(self._settings, field_path)}"
                         code_buffer.write(
-                            f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n'
+                            f'{field_indent}{attrname}={function_name}(data.pop("{mapping_fieldname}")),\n'
                         )
                 elif isinstance(field.type, Literal):
-                    function_name = generate_literal_extract_def(field.type)
-                    code_buffer.write(f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n')
+                    function_name = generate_literal_extract_def(field.type, field_path)
+                    code_buffer.write(f'{field_indent}{attrname}={function_name}(data.pop("{mapping_fieldname}")),\n')
                 elif isinstance(field.type, Union):
-                    function_name = generate_union_extract_def(field.type)
-                    value_extract = f'data.pop("{dict_fieldname}")'
+                    function_name = generate_union_extract_def(field.type, field_path)
+                    value_extract = f'data.pop("{mapping_fieldname}")'
                     if field.type.has_nullable():
-                        value_extract = f'data.pop("{dict_fieldname}", None)'
+                        value_extract = f'data.pop("{mapping_fieldname}", None)'
                     code_buffer.write(
-                        f"{field_indent}{field_name}={function_name}({value_extract}, check_for_remaining_keys),\n"
+                        f"{field_indent}{attrname}={function_name}({value_extract}, check_for_remaining_keys),\n"
                     )
                 elif isinstance(field.type, Structure):
-                    function_name = generate_structure_extract_def(field.type)
+                    function_name = generate_structure_extract_def(field.type, field_path)
                     code_buffer.write(
-                        f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}"), check_for_remaining_keys),\n'
+                        f'{field_indent}{attrname}={function_name}(data.pop("{mapping_fieldname}"), check_for_remaining_keys),\n'
                     )
                 elif isinstance(field.type, Sequence):
-                    function_name = generate_sequence_extract_def(field.type)
+                    function_name = generate_sequence_extract_def(field.type, field_path)
                     code_buffer.write(
-                        f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}"), check_for_remaining_keys),\n'
+                        f'{field_indent}{attrname}={function_name}(data.pop("{mapping_fieldname}"), check_for_remaining_keys),\n'
                     )
                 else:
                     assert_never(field.type)
