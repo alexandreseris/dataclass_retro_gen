@@ -464,6 +464,8 @@ class Union:
         return False
 
     def sort_types(self) -> None:
+        for t in self.types:
+            t.sort_types()
         self.types.sort()
 
 
@@ -680,7 +682,7 @@ class Sequence:
             raise ValueError("unreachable code")
 
     def sort_types(self) -> None:
-        pass
+        self.type.sort_types()
 
 
 class Field:
@@ -811,7 +813,8 @@ class Structure:
             return True
 
     def sort_types(self) -> None:
-        pass
+        for t in self.fields.values():
+            t.type.sort_types()
 
 
 class ParseResult:
