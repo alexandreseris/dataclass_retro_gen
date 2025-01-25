@@ -12,7 +12,7 @@ from textwrap import dedent, indent
 from typing import Any, Generic, Protocol, SupportsIndex, TypeAlias, TypeVar, cast
 from typing import Literal as TypingLiteral
 
-from typing_extensions import Self
+from typing_extensions import Self, assert_never
 
 RawScalars: TypeAlias = None | bool | str | float | int
 RawValues: TypeAlias = RawScalars | TypingSequence["RawValues"] | Mapping[str, "RawValues"]
@@ -309,8 +309,10 @@ class ScalarType:
         elif isinstance(other, Union):
             other.add_type(self)
             return other
-        else:  # Structure | Sequence
+        elif isinstance(other, (Structure, Sequence)):
             return Union(self, other)
+        else:
+            assert_never(other)
 
     def to_string(self, settings: type[Settings]) -> str:
         if self.type is NoneType:
@@ -430,9 +432,11 @@ class Union:
         elif isinstance(other, Union):
             self.merge(other)
             return self
-        else:  # Structure | Sequence
+        elif isinstance(other, (Structure, Sequence)):
             self.add_type(other)
             return self
+        else:
+            assert_never(other)
 
     def to_string(self, settings: type[Settings]) -> str:
         return " | ".join(x.to_string(settings) for x in self.types)
@@ -461,7 +465,10 @@ class Union:
             return True
         elif isinstance(other, Union):
             raise ValueError("unreachable code")
-        return False
+        elif isinstance(other, (Structure, Sequence)):
+            return True
+        else:
+            assert_never(other)
 
     def sort_types(self) -> None:
         for t in self.types:
@@ -517,8 +524,10 @@ class Literal:
             return other
         elif isinstance(other, Structure):
             raise ValueError("can't use literal with structure data")
-        else:
+        elif isinstance(other, Sequence):
             raise ValueError("can't use literal with sequence data")
+        else:
+            assert_never(other)
 
     def to_string(self, settings: type[Settings]) -> str:
         return f"typing.Literal[{', '.join(repr(x) for x in self.values)}]"
@@ -562,8 +571,10 @@ class Literal:
             return False
         elif isinstance(other, Structure):
             return False
-        else:  # Sequence
+        elif isinstance(other, Sequence):
             return False
+        else:
+            assert_never(other)
 
     def sort_types(self) -> None:
         self.values.sort(key=lambda x: (x is None, type(x).__name__, x))
@@ -599,9 +610,11 @@ class Sequence:
             return other
         elif isinstance(other, Structure):
             return Union(self, other)
-        else:  # Sequence
+        elif isinstance(other, Sequence):
             self.merge(other)
             return self
+        else:
+            assert_never(other)
 
     @classmethod
     def from_seq(
@@ -678,8 +691,10 @@ class Sequence:
             return True
         elif isinstance(other, Structure):
             return False
-        else:  # Sequence
+        elif isinstance(other, Sequence):
             raise ValueError("unreachable code")
+        else:
+            assert_never(other)
 
     def sort_types(self) -> None:
         self.type.sort_types()
@@ -777,8 +792,10 @@ class Structure:
         elif isinstance(other, Structure):
             self.merge(other)
             return self
-        else:  # Sequence
+        elif isinstance(other, Sequence):
             return Union(self, other)
+        else:
+            assert_never(other)
 
     def to_string(self, settings: type[Settings]) -> str:
         return settings.generate_class_name(self.path)
@@ -809,8 +826,10 @@ class Structure:
             return True
         elif isinstance(other, Structure):
             raise ValueError("unreachable code")
-        else:  # Sequence
+        elif isinstance(other, Sequence):
             return True
+        else:
+            assert_never(other)
 
     def sort_types(self) -> None:
         for t in self.fields.values():
@@ -937,7 +956,7 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                         generate_extract_functions_strs.append(
                             dedent(
                                 f"""\
-                                def {function_name}(value: typing.Any) -> "{type_str}":
+                                def {function_name}(value: typing.Any, check_for_remaining_keys: bool) -> "{type_str}":
                                     if not isinstance(value, typing.Sequence):
                                         raise ValueError(f"unepected type: {{type(value).__name__}}")
                                     for x in value:
@@ -950,22 +969,29 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                         return function_name
                     else:
                         inner_function_type_extract = f"extract_{sequence.type.to_python_varname(self.settings)}"
+                        function_call = f"{inner_function_type_extract}(x)"
                 elif isinstance(sequence.type, Literal):
                     inner_function_type_extract = generate_literal_extract_def(sequence.type)
+                    function_call = f"{inner_function_type_extract}(x)"
                 elif isinstance(sequence.type, Sequence):
                     inner_function_type_extract = generate_sequence_extract_def(sequence.type)
+                    function_call = f"{inner_function_type_extract}(x, check_for_remaining_keys)"
                 elif isinstance(sequence.type, Structure):
                     inner_function_type_extract = generate_structure_extract_def(sequence.type)
+                    function_call = f"{inner_function_type_extract}(x, check_for_remaining_keys)"
                 elif isinstance(sequence.type, Union):
                     inner_function_type_extract = generate_union_extract_def(sequence.type)
+                    function_call = f"{inner_function_type_extract}(x, check_for_remaining_keys)"
+                else:
+                    assert_never(sequence.type)
 
                 generate_extract_functions_strs.append(
                     dedent(
                         f"""\
-                        def {function_name}(value: typing.Any) -> "{type_str}":
+                        def {function_name}(value: typing.Any, check_for_remaining_keys: bool) -> "{type_str}":
                             if not isinstance(value, typing.Sequence):
                                 raise ValueError(f"unepected type: {{type(value).__name__}}")
-                            return [{inner_function_type_extract}(x) for x in value]
+                            return [{function_call} for x in value]
                         """
                     )
                 )
@@ -977,10 +1003,10 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                 generate_extract_functions_strs.append(
                     dedent(
                         f"""\
-                        def {function_name}(value: typing.Any) -> "{type_str}":
+                        def {function_name}(value: typing.Any, check_for_remaining_keys: bool) -> "{type_str}":
                             if not isinstance(value, typing.MutableMapping):
                                 raise ValueError(f"unepected type: {{type(value).__name__}}")
-                            return {type_str}.from_mapping(value)
+                            return {type_str}.from_mapping(value, check_for_remaining_keys)
                         """
                     )
                 )
@@ -994,7 +1020,7 @@ if value is None:
 """
                 sub_function_expr = """\
 try:
-    return {sub_function_name}(value)
+    return {function_call}
 except ValueError:
     pass
 """
@@ -1008,21 +1034,28 @@ except ValueError:
                             continue
                         else:
                             sub_function_name = f"extract_{type.to_python_varname(self.settings)}"
+                            function_call = f"{sub_function_name}(value)"
                     elif isinstance(type, Literal):
                         sub_function_name = generate_literal_extract_def(type)
+                        function_call = f"{sub_function_name}(value)"
                     elif isinstance(type, Sequence):
                         sub_function_name = generate_sequence_extract_def(type)
+                        function_call = f"{sub_function_name}(value, check_for_remaining_keys)"
                     elif isinstance(type, Structure):
                         sub_function_name = generate_structure_extract_def(type)
+                        function_call = f"{sub_function_name}(value, check_for_remaining_keys)"
                     elif isinstance(type, Union):
                         sub_function_name = generate_union_extract_def(type)
-                    convert_lines.append(sub_function_expr.format(sub_function_name=sub_function_name))
+                        function_call = f"{sub_function_name}(value, check_for_remaining_keys)"
+                    else:
+                        assert_never(type)
+                    convert_lines.append(sub_function_expr.format(function_call=function_call))
                 if has_None:
                     convert_lines.insert(0, none_expr)
                 convert_lines_expr_strs = "".join(indent(x, " " * 4) for x in convert_lines)
                 generate_extract_functions_strs.append(
                     f"""\
-def {function_name}(value: typing.Any) -> "{type_str}":
+def {function_name}(value: typing.Any, check_for_remaining_keys: bool) -> "{type_str}":
 {convert_lines_expr_strs}
     raise ValueError(f"unepected type: {{type(value).__name__}}")
 """
@@ -1031,7 +1064,7 @@ def {function_name}(value: typing.Any) -> "{type_str}":
 
             code_buffer.write("    @classmethod\n")
             code_buffer.write(
-                "    def from_mapping(cls, data: typing.MutableMapping[str, typing.Any]) -> typing_extensions.Self:\n"
+                "    def from_mapping(cls, data: typing.MutableMapping[str, typing.Any], check_for_remaining_keys: bool = True) -> typing_extensions.Self:\n"
             )
             code_buffer.write("        obj = cls(\n")
             for field in struct.fields.values():
@@ -1053,22 +1086,26 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                     code_buffer.write(f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n')
                 elif isinstance(field.type, Union):
                     function_name = generate_union_extract_def(field.type)
+                    value_extract = f'data.pop("{dict_fieldname}")'
                     if field.type.has_nullable():
-                        code_buffer.write(
-                            f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}", None)),\n'
-                        )
-                    else:
-                        code_buffer.write(
-                            f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n'
-                        )
+                        value_extract = f'data.pop("{dict_fieldname}", None)'
+                    code_buffer.write(
+                        f"{field_indent}{field_name}={function_name}({value_extract}, check_for_remaining_keys),\n"
+                    )
                 elif isinstance(field.type, Structure):
                     function_name = generate_structure_extract_def(field.type)
-                    code_buffer.write(f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n')
+                    code_buffer.write(
+                        f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}"), check_for_remaining_keys),\n'
+                    )
                 elif isinstance(field.type, Sequence):
                     function_name = generate_sequence_extract_def(field.type)
-                    code_buffer.write(f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n')
+                    code_buffer.write(
+                        f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}"), check_for_remaining_keys),\n'
+                    )
+                else:
+                    assert_never(field.type)
             code_buffer.write("        )\n")
-            code_buffer.write("        if len(data) > 0:\n")
+            code_buffer.write("        if check_for_remaining_keys and len(data) > 0:\n")
             code_buffer.write("            raise ValueError('remaining field', data)\n")
             code_buffer.write("        return obj\n")
             code_buffer.write("\n\n")
