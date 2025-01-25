@@ -1,9 +1,8 @@
 import datetime
 import functools
 import io
-from collections.abc import AsyncIterable, Iterable, Mapping
+from collections.abc import AsyncIterable, Callable, Iterable, Mapping
 from collections.abc import Sequence as TypingSequence
-from copy import copy
 from dataclasses import dataclass
 from functools import reduce
 from inspect import getsource
@@ -19,7 +18,6 @@ RawValues: TypeAlias = RawScalars | TypingSequence["RawValues"] | Mapping[str, "
 
 NoneType = type(None)
 ScalarValue = bool | int | float | str | datetime.date | datetime.datetime | datetime.time | None
-ScalarType_ = type[ScalarValue]
 UnionMember: TypeAlias = "ScalarType | Structure | Sequence | Literal"
 SequenceMember: TypeAlias = "ScalarType | Literal | Union | Structure | Sequence"
 FieldType: TypeAlias = "ScalarType | Literal | Union | Structure | Sequence"
@@ -38,9 +36,9 @@ class Settings(Protocol):
         Returns:
             str: the class name
         """
-        if not namepath.path:
-            return namepath.root.capitalize()
-        return f"{namepath.root.capitalize()}_{'_'.join(x.capitalize() for x in namepath.path)}"
+        if not namepath._path:
+            return namepath._root.capitalize()
+        return f"{namepath._root.capitalize()}_{'_'.join(x.capitalize() for x in namepath._path)}"
 
     @staticmethod
     def generate_class_attribute_name(keyname: str) -> str:
@@ -64,12 +62,21 @@ class Settings(Protocol):
         return "item"
 
     @staticmethod
-    def use_literal(path: "NamePath", key: str, value: RawScalars) -> bool:
-        """Specify when to collect literal value instead of types. Works only for scalar values
+    def consider_empty_str_as_null() -> bool:
+        """Specify if you wish to convert empty string to None
+
+        Returns:
+            bool: your desired behavior
+        """
+        return True
+
+    @staticmethod
+    def use_literal(keypath: "NamePath", is_sequence_item: bool, value: RawScalars) -> bool:
+        """Specify when to collect literal value instead of types. Called only for scalar values or scalar value in sequence
 
         Args:
-            path (NamePath): path of the parent object's value
-            key (str): key of the value
+            keypath (NamePath): full path of the value.
+            is_sequence_item (bool): whether the value comes from a sequence
             value (RawScalars): raw value
 
         Returns:
@@ -78,12 +85,12 @@ class Settings(Protocol):
         return False
 
     @staticmethod
-    def use_date(path: "NamePath", key: str, value: RawScalars) -> bool:
+    def use_date(keypath: "NamePath", is_sequence_item: bool, value: RawScalars) -> bool:
         """Specify when to try to parse date from value
 
         Args:
-            path (NamePath): path of the parent object's value
-            key (str): key of the value
+            keypath (NamePath): full path of the value.
+            is_sequence_item (bool): whether the value comes from a sequence
             value (RawScalars): raw value
 
         Returns:
@@ -112,12 +119,12 @@ class Settings(Protocol):
             return None
 
     @staticmethod
-    def use_datetime(path: "NamePath", key: str, value: RawScalars) -> bool:
+    def use_datetime(keypath: "NamePath", is_sequence_item: bool, value: RawScalars) -> bool:
         """Specify when to try to parse datetime from value
 
         Args:
-            path (NamePath): path of the parent object's value
-            key (str): key of the value
+            keypath (NamePath): path of the parent object's value
+            is_sequence_item (bool): whether the value comes from a sequence
             value (RawScalars): raw value
 
         Returns:
@@ -140,18 +147,21 @@ class Settings(Protocol):
             if isinstance(v, datetime.datetime):
                 return v
             if isinstance(v, str):
-                return datetime.datetime.fromisoformat(v)
+                d = datetime.datetime.fromisoformat(v)
+                if d.tzinfo is None:
+                    return d.replace(tzinfo=datetime.timezone.utc)
+                return d
             return None
         except ValueError:
             return None
 
     @staticmethod
-    def use_time(path: "NamePath", key: str, value: RawScalars) -> bool:
+    def use_time(keypath: "NamePath", is_sequence_item: bool, value: RawScalars) -> bool:
         """Specify when to try to parse time from value
 
         Args:
-            path (NamePath): path of the parent object's value
-            key (str): key of the value
+            keypath (NamePath): path of the parent object's value
+            is_sequence_item (bool): whether the value comes from a sequence
             value (RawScalars): raw value
 
         Returns:
@@ -178,32 +188,59 @@ class Settings(Protocol):
             return None
 
 
-def parse_field(path: "NamePath", key: str, value: RawScalars, settings: type[Settings]) -> ScalarValue:
+class DefaultSettings(Settings):
+    pass
+
+
+def parse_field(
+    keypath: "NamePath", is_sequence_item: bool, value: RawScalars, settings: type[Settings]
+) -> ScalarValue:
     if (
-        settings.use_date(path, key, value)
+        settings.use_date(keypath, is_sequence_item, value)
         and isinstance(value, (str, int, float))
         and (date_value := settings.parse_date(value))
     ):
         return date_value
     if (
-        settings.use_datetime(path, key, value)
+        settings.use_datetime(keypath, is_sequence_item, value)
         and isinstance(value, (str, int, float))
         and (datetime_value := settings.parse_datetime(value))
     ):
         return datetime_value
-    if settings.use_time(path, key, value) and isinstance(value, str) and (time_value := settings.parse_time(value)):
+    if (
+        settings.use_time(keypath, is_sequence_item, value)
+        and isinstance(value, str)
+        and (time_value := settings.parse_time(value))
+    ):
         return time_value
     return value
 
 
-def build_structure_sorter(settings: type[Settings]):  # type: ignore[no-untyped-def]
+_T_contra = TypeVar("_T_contra", contravariant=True)
+
+
+class SupportsAllComparisons(Protocol):
+    def __lt__(self, other: _T_contra, /) -> bool:
+        ...
+
+    def __gt__(self, other: _T_contra, /) -> bool:
+        ...
+
+    def __le__(self, other: _T_contra, /) -> bool:
+        ...
+
+    def __ge__(self, other: _T_contra, /) -> bool:
+        ...
+
+
+def build_structure_sorter(settings: type[Settings]) -> Callable[["Structure"], SupportsAllComparisons]:
     def sort_structure(self: "Structure", other: "Structure") -> int:
         if self.depth > other.depth:
             return -1
         if self.depth > other.depth:
             return 1
-        self_path_str = settings.generate_class_name(self.path)
-        other_path_str = settings.generate_class_name(other.path)
+        self_path_str = settings.generate_class_name(self.structpath)
+        other_path_str = settings.generate_class_name(other.structpath)
         if self_path_str > other_path_str:
             return 1
         if self_path_str < other_path_str:
@@ -219,7 +256,7 @@ class Comparable(Protocol):
         ...
 
 
-C = TypeVar("C", bound=Comparable)
+C = TypeVar("C", bound=Comparable | None)
 
 
 class UniqueList(list[C], Generic[C]):
@@ -247,42 +284,58 @@ class UniqueList(list[C], Generic[C]):
 class NamePath:
     """Describe the path of an object
     eg: for `parse_unstructured_data("somerootname", {"a": [1, 2, 3]}, "b": {"c": 2})`:
-    - the path of a items is `NamePath("somerootname", ["a", "item"])` # the name used for the sequence item is controlled by the setting get_sequence_item_path_name
-    - the path of c value is `NamePath("somerootname", ["a", "b", "c"])`
+    - the path of `a` items is `NamePath("somerootname", ["a", "item"])`.
+        the name used for the sequence item is controlled by the setting get_sequence_item_path_name
+    - the path of `a.b.c` is `NamePath("somerootname", ["a", "b", "c"])`.
     """
 
-    def __init__(self, root: str, path: list[str] | None = None) -> None:
-        """Create a new `NamePath`
-
-        Args:
-            root (str): the same value you passed to parse_unstructured_data.root_name
-            path (list[str] | None, optional): sub path of the object. Defaults to None.
-        """
-        self.root = root
-        self.path = path or []
+    def __init__(self, root: str, path: tuple[str, ...] = tuple()) -> None:
+        self._root = root
+        self._path = path
 
     def __repr__(self) -> str:
-        if self.path:
-            return f"{self.root} => {'/'.join(self.path)}"
-        return self.root
+        if self._path:
+            return f"{self._root} => {'/'.join(self._path)}"
+        return self._root
 
     def __hash__(self) -> int:
-        return hash(type(self)) + hash(self.root) + hash(tuple(self.path))
+        return hash(type(self)) + hash(self._root) + hash(self._path)
 
     def __eq__(self, value: object) -> bool:
         if not isinstance(value, type(self)):
             return False
-        return self.root == value.root and self.path == value.path
+        return self._root == value._root and self._path == value._path
 
-    def add_path(self, name: str) -> "NamePath":
-        sub = NamePath(self.root)
-        sub.path = copy(self.path)
-        sub.path.append(name)
-        return sub
+    def _add_path(self, name: str) -> "NamePath":
+        return NamePath(self._root, self._path + (name,))
+
+    def has_pathpart(self, pathpart: str) -> bool:
+        """check if `pathpart` is in the current path"""
+        return pathpart in self._path
+
+    def has_any_of_pathparts(self, *pathparts: str) -> bool:
+        """check if any of the `pathparts` are in the current path"""
+        return any(self.has_pathpart(x) for x in pathparts)
+
+    def has_lastpart(self, lastpart: str) -> bool:
+        """check if `lastpart` is the last part of the current path"""
+        return len(self._path) > 0 and self._path[-1] == lastpart
+
+    def has_any_of_lastparts(self, *lastparts: str) -> bool:
+        """check if any of `lastparts` are the last part of the current path"""
+        return any(self.has_lastpart(x) for x in lastparts)
+
+    def is_fullpath(self, fullpath: tuple[str, ...]) -> bool:
+        """check if current path match `fullpath`"""
+        return self._path == fullpath
+
+    def is_any_of_fullpaths(self, *fullpaths: tuple[str, ...]) -> bool:
+        """check if current path match any of the `fullpaths`"""
+        return any(self.is_fullpath(x) for x in fullpaths)
 
 
 class ScalarType:
-    def __init__(self, type: ScalarType_) -> None:
+    def __init__(self, type: type[ScalarValue]) -> None:
         self.type = type
 
     def __hash__(self) -> int:
@@ -322,7 +375,7 @@ class ScalarType:
         return f"{self.type.__module__}.{self.type.__name__}"
 
     def __repr__(self) -> str:
-        return self.to_string(Settings)  # type: ignore[type-abstract]
+        return self.to_string(DefaultSettings)
 
     def to_python_varname(self, settings: type[Settings]) -> str:
         return self.type.__name__
@@ -442,7 +495,7 @@ class Union:
         return " | ".join(x.to_string(settings) for x in self.types)
 
     def __repr__(self) -> str:
-        return self.to_string(Settings)  # type: ignore[type-abstract]
+        return self.to_string(DefaultSettings)
 
     def to_python_varname(self, settings: type[Settings]) -> str:
         return f"Union_{'__'.join(x.to_python_varname(settings) for x in self.types)}"
@@ -478,12 +531,14 @@ class Union:
 
 class Literal:
     def __init__(self, initial_value: ScalarValue) -> None:
-        self.values = UniqueList([initial_value])  # type: ignore[type-var]
+        self.values = UniqueList([initial_value])
 
     @classmethod
-    def from_value(self, initial_value: ScalarValue) -> "Literal | ScalarType":
-        if isinstance(initial_value, float):  # Literal does not support float values? wtf
-            return ScalarType(float)
+    def from_value(cls, initial_value: ScalarValue) -> "Literal":
+        if isinstance(initial_value, float):
+            raise ValueError(
+                "float type is unsuported in literal :( see https://peps.python.org/pep-0586/#illegal-parameters-for-literal-at-type-check-time "
+            )
         return Literal(initial_value)
 
     def __hash__(self) -> int:
@@ -533,7 +588,7 @@ class Literal:
         return f"typing.Literal[{', '.join(repr(x) for x in self.values)}]"
 
     def __repr__(self) -> str:
-        return self.to_string(Settings)  # type: ignore[type-abstract]
+        return self.to_string(DefaultSettings)
 
     def to_python_varname(self, settings: type[Settings]) -> str:
         value_strs = []
@@ -618,7 +673,7 @@ class Sequence:
 
     @classmethod
     def from_seq(
-        cls, path: NamePath, seq: TypingSequence[RawValues], depth: int, settings: type[Settings]
+        cls, seqpath: NamePath, seq: TypingSequence[RawValues], depth: int, settings: type[Settings]
     ) -> "Sequence | None":
         ITEM_PATH = settings.get_sequence_item_path_name()
         scalar: Literal | ScalarType | Union | None = None
@@ -626,20 +681,22 @@ class Sequence:
         sequence: Sequence | None = None
         for value in seq:
             if isinstance(value, Mapping):
-                sub_structure = Structure.from_mapping(path.add_path(ITEM_PATH), value, depth, settings)
+                sub_structure = Structure.from_mapping(seqpath._add_path(ITEM_PATH), value, depth, settings)
                 if strucure is None:
                     strucure = sub_structure
                 else:
                     strucure.merge(sub_structure)
             elif isinstance(value, TypingSequence) and not isinstance(value, str):
-                sub_sequence = Sequence.from_seq(path, value, depth, settings)
+                sub_sequence = Sequence.from_seq(seqpath._add_path(ITEM_PATH), value, depth, settings)
                 if sequence is None:
                     sequence = sub_sequence
                 elif sub_sequence is not None:
                     sequence.merge(sub_sequence)
             else:
-                conv_value = parse_field(path, ITEM_PATH, value, settings)
-                if settings.use_literal(path, ITEM_PATH, value):
+                conv_value = parse_field(seqpath, True, value, settings)
+                if settings.consider_empty_str_as_null() and isinstance(value, str) and value == "":
+                    conv_value = None
+                if settings.use_literal(seqpath, True, value):
                     sub_scalar_literal = Literal.from_value(conv_value)
                     if scalar is None:
                         scalar = sub_scalar_literal
@@ -667,7 +724,7 @@ class Sequence:
         return f"collections.abc.Sequence[{self.type.to_string(settings)}]"
 
     def __repr__(self) -> str:
-        return self.to_string(Settings)  # type: ignore[type-abstract]
+        return self.to_string(DefaultSettings)
 
     def to_python_varname(self, settings: type[Settings]) -> str:
         return f"Sequence_{self.type.to_python_varname(settings)}"
@@ -731,39 +788,42 @@ class Field:
 
 
 class Structure:
-    def __init__(self, path: NamePath, fields: dict[str, Field], depth: int) -> None:
-        self.path = path
+    def __init__(self, structpath: NamePath, fields: dict[str, Field], depth: int) -> None:
+        self.structpath = structpath
         self.fields = fields
         self.depth = depth
 
     def __hash__(self) -> int:
-        return hash(type(self)) + hash(self.path)
+        return hash(type(self)) + hash(self.structpath)
 
     def __eq__(self, value: object) -> bool:
         if not isinstance(value, type(self)):
             return False
-        return self.path == value.path
+        return self.structpath == value.structpath
 
     @classmethod
     def from_mapping(
-        cls, path: NamePath, mapping: Mapping[str, RawValues], depth: int, settings: type[Settings]
+        cls, structpath: NamePath, mapping: Mapping[str, RawValues], depth: int, settings: type[Settings]
     ) -> "Structure":
         fields: dict[str, Field] = {}
         for key, value in mapping.items():
+            keypath = structpath._add_path(key)
             if isinstance(value, Mapping):
-                fields[key] = Field(key, Structure.from_mapping(path.add_path(key), value, depth + 1, settings))
+                fields[key] = Field(key, Structure.from_mapping(keypath, value, depth + 1, settings))
             elif isinstance(value, TypingSequence) and not isinstance(value, str):
-                seq = Sequence.from_seq(path.add_path(key), value, depth + 1, settings)
+                seq = Sequence.from_seq(keypath, value, depth + 1, settings)
                 if seq is None:
                     continue
                 fields[key] = Field(key, seq)
             else:
-                conv_value = parse_field(path, key, value, settings)
-                if settings.use_literal(path, key, value):
+                conv_value = parse_field(keypath, False, value, settings)
+                if settings.consider_empty_str_as_null() and isinstance(value, str) and value == "":
+                    conv_value = None
+                if settings.use_literal(keypath, False, value):
                     fields[key] = Field(key, Literal.from_value(conv_value))
                 else:
                     fields[key] = Field(key, ScalarType(type(conv_value)))
-        return cls(path, fields, depth)
+        return cls(structpath, fields, depth)
 
     def merge(self, other: "Structure") -> None:
         for key in self.fields:
@@ -798,13 +858,13 @@ class Structure:
             assert_never(other)
 
     def to_string(self, settings: type[Settings]) -> str:
-        return settings.generate_class_name(self.path)
+        return settings.generate_class_name(self.structpath)
 
     def __repr__(self) -> str:
-        return self.to_string(Settings)  # type: ignore[type-abstract]
+        return self.to_string(DefaultSettings)
 
     def to_python_varname(self, settings: type[Settings]) -> str:
-        return settings.generate_class_name(self.path)
+        return settings.generate_class_name(self.structpath)
 
     def get_dependencies_types(self) -> "tuple[UniqueList[Structure], UniqueList[type]]":
         structs: UniqueList[Structure] = UniqueList([self])
@@ -842,8 +902,8 @@ class ParseResult:
         settings: type[Settings],
         root_structure: Structure,
     ):
-        self.settings = settings
-        self.root_structure = root_structure
+        self._settings = settings
+        self._root_structure = root_structure
 
     def write_definitions(self, code_buffer: io.TextIOBase, generate_from_mapping_methods: bool = False) -> None:
         """Write the definitions of the classes generated by parse_unstructured_data
@@ -852,8 +912,8 @@ class ParseResult:
             code_buffer (io.TextIOBase): a text buffer used to write the code into
             generate_from_mapping_methods (bool, optional): whether to generate `from_mapping` class method for the classes generated. Defaults to False.
         """
-        structures, imports = self.root_structure.get_dependencies_types()
-        structures.append(self.root_structure)
+        structures, imports = self._root_structure.get_dependencies_types()
+        structures.append(self._root_structure)
         imports.append(cast(type, dataclass))
         if generate_from_mapping_methods:
             for t in (Mapping, Any, datetime.date, datetime.datetime, datetime.time, cast, Self):
@@ -870,9 +930,9 @@ class ParseResult:
         if has_imported_something:
             code_buffer.write("\n\n")
         generate_extract_functions_strs: UniqueList[str] = UniqueList()
-        for struct in sorted(structures, key=build_structure_sorter(self.settings)):
+        for struct in sorted(structures, key=build_structure_sorter(self._settings)):
             code_buffer.write("@dataclasses.dataclass\n")
-            classname = struct.to_string(self.settings)
+            classname = struct.to_string(self._settings)
             code_buffer.write(f"class {classname}:\n")
             if not struct.fields:
                 code_buffer.write("    pass\n\n\n")
@@ -882,8 +942,8 @@ class ParseResult:
                 field_type.sort_types()
                 if isinstance(field.type, Literal) and (bool_conversion := field.type.convert_bool_literal_to_scalar()):
                     field_type = bool_conversion
-                field_type_str = field_type.to_string(self.settings).replace('"', '\\"')
-                field_name = self.settings.generate_class_attribute_name(field.name)
+                field_type_str = field_type.to_string(self._settings).replace('"', '\\"')
+                field_name = self._settings.generate_class_attribute_name(field.name)
                 mapping_key = ""
                 if field.name != field_name:
                     field_name_escaped = repr(field.name).replace('"', '\\"')
@@ -896,8 +956,8 @@ class ParseResult:
             field_indent = "            "
 
             def generate_literal_extract_def(literal: Literal) -> str:
-                function_name = f"extract_{literal.to_python_varname(self.settings)}"
-                type_str = literal.to_string(self.settings)
+                function_name = f"extract_{literal.to_python_varname(self._settings)}"
+                type_str = literal.to_string(self._settings)
                 literal_values = literal.values
                 has_datetime = False
                 has_date = False
@@ -948,8 +1008,8 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                 return function_name
 
             def generate_sequence_extract_def(sequence: Sequence) -> str:
-                function_name = f"extract_{sequence.to_python_varname(self.settings)}"
-                type_str = sequence.to_string(self.settings)
+                function_name = f"extract_{sequence.to_python_varname(self._settings)}"
+                type_str = sequence.to_string(self._settings)
 
                 if isinstance(sequence.type, ScalarType):
                     if sequence.type.is_none():
@@ -968,7 +1028,7 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                         )
                         return function_name
                     else:
-                        inner_function_type_extract = f"extract_{sequence.type.to_python_varname(self.settings)}"
+                        inner_function_type_extract = f"extract_{sequence.type.to_python_varname(self._settings)}"
                         function_call = f"{inner_function_type_extract}(x)"
                 elif isinstance(sequence.type, Literal):
                     inner_function_type_extract = generate_literal_extract_def(sequence.type)
@@ -998,8 +1058,8 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                 return function_name
 
             def generate_structure_extract_def(structure: Structure) -> str:
-                function_name = f"extract_{structure.to_python_varname(self.settings)}"
-                type_str = structure.to_string(self.settings)
+                function_name = f"extract_{structure.to_python_varname(self._settings)}"
+                type_str = structure.to_string(self._settings)
                 generate_extract_functions_strs.append(
                     dedent(
                         f"""\
@@ -1013,7 +1073,7 @@ def {function_name}(value: typing.Any) -> "{type_str}":
                 return function_name
 
             def generate_union_extract_def(union: Union) -> str:
-                function_name = f"extract_{union.to_python_varname(self.settings)}"
+                function_name = f"extract_{union.to_python_varname(self._settings)}"
                 none_expr = """\
 if value is None:
     return None
@@ -1024,7 +1084,7 @@ try:
 except ValueError:
     pass
 """
-                type_str = union.to_string(self.settings)
+                type_str = union.to_string(self._settings)
                 convert_lines: list[str] = []
                 has_None = False
                 for type in union.types:
@@ -1033,7 +1093,7 @@ except ValueError:
                             has_None = True
                             continue
                         else:
-                            sub_function_name = f"extract_{type.to_python_varname(self.settings)}"
+                            sub_function_name = f"extract_{type.to_python_varname(self._settings)}"
                             function_call = f"{sub_function_name}(value)"
                     elif isinstance(type, Literal):
                         sub_function_name = generate_literal_extract_def(type)
@@ -1068,7 +1128,7 @@ def {function_name}(value: typing.Any, check_for_remaining_keys: bool) -> "{type
             )
             code_buffer.write("        obj = cls(\n")
             for field in struct.fields.values():
-                field_name = self.settings.generate_class_attribute_name(field.name)
+                field_name = self._settings.generate_class_attribute_name(field.name)
                 dict_fieldname = field.name
                 if isinstance(field.type, ScalarType):
                     if field.type.is_none():
@@ -1077,7 +1137,7 @@ def {function_name}(value: typing.Any, check_for_remaining_keys: bool) -> "{type
                             f'{field_indent}{field_name}=None if check_for_None(data.pop("{dict_fieldname}", None)) else None,\n'
                         )
                     else:
-                        function_name = f"extract_{field.type.to_python_varname(self.settings)}"
+                        function_name = f"extract_{field.type.to_python_varname(self._settings)}"
                         code_buffer.write(
                             f'{field_indent}{field_name}={function_name}(data.pop("{dict_fieldname}")),\n'
                         )
@@ -1157,7 +1217,7 @@ def {function_name}(value: typing.Any, check_for_remaining_keys: bool) -> "{type
                 """
             )
             code_buffer.write(extract_defs)
-            for f in (self.settings.parse_date, self.settings.parse_datetime, self.settings.parse_time):
+            for f in (self._settings.parse_date, self._settings.parse_datetime, self._settings.parse_time):
                 source = getsource(f)
                 source = dedent(source)
                 source = "\n".join(source.splitlines()[1:])
