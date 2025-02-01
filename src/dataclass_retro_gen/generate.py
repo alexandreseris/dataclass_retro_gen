@@ -7,6 +7,7 @@ from collections.abc import Sequence as TypingSequence
 from dataclasses import dataclass
 from functools import reduce
 from inspect import getsource
+from io import StringIO
 from itertools import chain
 from textwrap import dedent, indent
 from typing import Any, Generic, Protocol, SupportsIndex, TypeAlias, TypeVar, cast
@@ -378,7 +379,7 @@ class ScalarType:
         else:
             assert_never(other)
 
-    def to_string(self, settings: type[Settings]) -> str:
+    def to_string(self, settings: type[Settings], path: NamePath) -> str:
         if self.type is NoneType:
             return "None"
         if self.type.__module__ == "builtins":
@@ -386,7 +387,7 @@ class ScalarType:
         return f"{self.type.__module__}.{self.type.__name__}"
 
     def __repr__(self) -> str:
-        return self.to_string(DefaultSettings)
+        return self.to_string(DefaultSettings, NamePath("debug"))
 
     def to_python_varname(self, settings: type[Settings], valuepath: NamePath) -> str:
         return self.type.__name__
@@ -408,6 +409,9 @@ class ScalarType:
 
     def sort_types(self) -> None:
         pass
+
+    def get_literal_types(self) -> "list[Literal]":
+        return []
 
 
 class Union:
@@ -502,11 +506,11 @@ class Union:
         else:
             assert_never(other)
 
-    def to_string(self, settings: type[Settings]) -> str:
-        return " | ".join(x.to_string(settings) for x in self.types)
+    def to_string(self, settings: type[Settings], path: NamePath) -> str:
+        return " | ".join(x.to_string(settings, path) for x in self.types)
 
     def __repr__(self) -> str:
-        return self.to_string(DefaultSettings)
+        return self.to_string(DefaultSettings, NamePath("debug"))
 
     def to_python_varname(self, settings: type[Settings], valuepath: NamePath) -> str:
         return f"Union_{'__'.join(x.to_python_varname(settings, valuepath) for x in self.types)}"
@@ -538,6 +542,12 @@ class Union:
         for t in self.types:
             t.sort_types()
         self.types.sort()
+
+    def get_literal_types(self) -> "list[Literal]":
+        types = []
+        for t in self.types:
+            types.extend(t.get_literal_types())
+        return types
 
 
 class Literal:
@@ -573,12 +583,6 @@ class Literal:
     def merge(self, other: "Literal") -> "None":
         self.values.extend(other.values)
 
-    def convert_bool_literal_to_scalar(self) -> ScalarType | None:
-        types: UniqueList[type] = UniqueList(type(x) for x in self.values)
-        if len(types) == 1 and isinstance(types[0], bool) and len(self.values) == 2:
-            return ScalarType(bool)
-        return None
-
     def merge_with_field_type(self, other: FieldType) -> FieldType:
         if isinstance(other, ScalarType):
             return Union(self, other)
@@ -595,11 +599,14 @@ class Literal:
         else:
             assert_never(other)
 
-    def to_string(self, settings: type[Settings]) -> str:
+    def to_string(self, settings: type[Settings], path: NamePath) -> str:
+        return self.to_python_varname(settings, path)
+
+    def to_python_definition(self) -> str:
         return f"typing.Literal[{', '.join(repr(x) for x in self.values)}]"
 
     def __repr__(self) -> str:
-        return self.to_string(DefaultSettings)
+        return self.to_python_definition()
 
     def to_python_varname(self, settings: type[Settings], valuepath: NamePath) -> str:
         valuepath_str = settings.generate_class_name(valuepath)
@@ -609,6 +616,12 @@ class Literal:
         structs: UniqueList[Structure] = UniqueList()
         stdtypes: UniqueList[type] = UniqueList([cast(type, TypingLiteral)])
         return (structs, stdtypes)
+
+    def has_nullable(self) -> bool:
+        for value in self.values:
+            if value is None:
+                return True
+        return False
 
     def __lt__(self, other: FieldType) -> bool:
         if isinstance(other, ScalarType):
@@ -628,6 +641,9 @@ class Literal:
 
     def sort_types(self) -> None:
         self.values.sort(key=lambda x: (x is None, type(x).__name__, x))
+
+    def get_literal_types(self) -> "list[Literal]":
+        return [self]
 
 
 class Sequence:
@@ -715,11 +731,11 @@ class Sequence:
             return None
         return Sequence(reduce(lambda x, y: x.merge_with_field_type(y), found_types))
 
-    def to_string(self, settings: type[Settings]) -> str:
-        return f"collections.abc.Sequence[{self.type.to_string(settings)}]"
+    def to_string(self, settings: type[Settings], path: NamePath) -> str:
+        return f"collections.abc.Sequence[{self.type.to_string(settings, path)}]"
 
     def __repr__(self) -> str:
-        return self.to_string(DefaultSettings)
+        return self.to_string(DefaultSettings, NamePath("debug"))
 
     def to_python_varname(self, settings: type[Settings], valuepath: NamePath) -> str:
         return f"Sequence_{self.type.to_python_varname(settings, valuepath)}"
@@ -750,6 +766,9 @@ class Sequence:
 
     def sort_types(self) -> None:
         self.type.sort_types()
+
+    def get_literal_types(self) -> "list[Literal]":
+        return self.type.get_literal_types()
 
 
 class Field:
@@ -852,11 +871,11 @@ class Structure:
         else:
             assert_never(other)
 
-    def to_string(self, settings: type[Settings]) -> str:
+    def to_string(self, settings: type[Settings], path: NamePath) -> str:
         return settings.generate_class_name(self.structpath)
 
     def __repr__(self) -> str:
-        return self.to_string(DefaultSettings)
+        return self.to_string(DefaultSettings, NamePath("debug"))
 
     def to_python_varname(self, settings: type[Settings], valuepath: NamePath) -> str:
         return settings.generate_class_name(self.structpath)
@@ -889,6 +908,9 @@ class Structure:
     def sort_types(self) -> None:
         for t in self.fields.values():
             t.type.sort_types()
+
+    def get_literal_types(self) -> "list[Literal]":
+        return []
 
 
 class ParseResult:
@@ -926,33 +948,39 @@ class ParseResult:
             code_buffer.write("\n\n")
         generate_extract_functions_strs: UniqueList[str] = UniqueList()
         for struct in sorted(structures, key=build_structure_sorter(self._settings)):
-            code_buffer.write("@dataclasses.dataclass\n")
-            classname = struct.to_string(self._settings)
-            code_buffer.write(f"class {classname}:\n")
+            struct_code_buffer = StringIO()
+            struct_code_buffer.write("@dataclasses.dataclass\n")
+            classname = struct.to_string(self._settings, struct.structpath)
+            struct_code_buffer.write(f"class {classname}:\n")
             if not struct.fields:
-                code_buffer.write("    pass\n\n\n")
+                struct_code_buffer.write("    pass\n\n\n")
                 continue
             for field in struct.fields.values():
-                field_type = field.type
-                field_type.sort_types()
-                if isinstance(field.type, Literal) and (bool_conversion := field.type.convert_bool_literal_to_scalar()):
-                    field_type = bool_conversion
-                field_type_str = field_type.to_string(self._settings).replace('"', '\\"')
+                field.type.sort_types()
                 attrname = self._settings.generate_class_attribute_name(field.name)
+                field_path = struct.structpath._add_path(attrname)
+                field_type_str = field.type.to_string(self._settings, field_path).replace('"', '\\"')
+                for lit in field.type.get_literal_types():
+                    lit_name = lit.to_string(self._settings, field_path)
+                    lit_def = lit.to_python_definition()
+                    code_buffer.write(f"{lit_name}: typing.TypeAlias = {lit_def}\n")
                 mapping_key = ""
                 if field.name != attrname:
                     field_name_escaped = repr(field.name).replace('"', '\\"')
                     mapping_key = f'{{"mapping_key": "{field_name_escaped}"}}'
-                code_buffer.write(f'    {attrname}: "{field_type_str}" = dataclasses.field({mapping_key})\n')
+                struct_code_buffer.write(f'    {attrname}: "{field_type_str}" = dataclasses.field({mapping_key})\n')
             if not generate_from_mapping_methods:
-                code_buffer.write("\n\n")
+                struct_code_buffer.write("\n\n")
+                struct_code_buffer.flush()
+                struct_code_buffer.seek(0)
+                code_buffer.write(struct_code_buffer.read())
                 continue
 
             field_indent = "            "
 
             def generate_literal_extract_def(literal: Literal, valuepath: NamePath) -> str:
                 function_name = f"extract_{literal.to_python_varname(self._settings, valuepath)}"
-                type_str = literal.to_string(self._settings)
+                type_str = literal.to_string(self._settings, valuepath)
                 literal_values = literal.values
                 has_datetime = False
                 has_date = False
@@ -1004,7 +1032,7 @@ def {function_name}(value: typing.Any) -> "{type_str}":
 
             def generate_sequence_extract_def(sequence: Sequence, valuepath: NamePath) -> str:
                 function_name = f"extract_{sequence.to_python_varname(self._settings, valuepath)}"
-                type_str = sequence.to_string(self._settings)
+                type_str = sequence.to_string(self._settings, valuepath)
 
                 if isinstance(sequence.type, ScalarType):
                     if sequence.type.is_none():
@@ -1056,7 +1084,7 @@ def {function_name}(value: typing.Any) -> "{type_str}":
 
             def generate_structure_extract_def(structure: Structure, valuepath: NamePath) -> str:
                 function_name = f"extract_{structure.to_python_varname(self._settings, valuepath)}"
-                type_str = structure.to_string(self._settings)
+                type_str = structure.to_string(self._settings, valuepath)
                 generate_extract_functions_strs.append(
                     dedent(
                         f"""\
@@ -1081,7 +1109,7 @@ try:
 except ValueError:
     pass
 """
-                type_str = union.to_string(self._settings)
+                type_str = union.to_string(self._settings, valuepath)
                 convert_lines: list[str] = []
                 has_None = False
                 for type in union.types:
@@ -1119,11 +1147,11 @@ def {function_name}(value: typing.Any, check_for_remaining_keys: bool) -> "{type
                 )
                 return function_name
 
-            code_buffer.write("    @classmethod\n")
-            code_buffer.write(
+            struct_code_buffer.write("    @classmethod\n")
+            struct_code_buffer.write(
                 "    def from_mapping(cls, data: typing.MutableMapping[str, typing.Any], check_for_remaining_keys: bool = True) -> typing_extensions.Self:\n"
             )
-            code_buffer.write("        obj = cls(\n")
+            struct_code_buffer.write("        obj = cls(\n")
             for field in struct.fields.values():
                 attrname = self._settings.generate_class_attribute_name(field.name)
                 mapping_fieldname = field.name
@@ -1131,42 +1159,48 @@ def {function_name}(value: typing.Any, check_for_remaining_keys: bool) -> "{type
                 if isinstance(field.type, ScalarType):
                     if field.type.is_none():
                         # mypy does not allow to save the return of a function returning None
-                        code_buffer.write(
+                        struct_code_buffer.write(
                             f'{field_indent}{attrname}=None if check_for_None(data.pop("{mapping_fieldname}", None)) else None,\n'
                         )
                     else:
                         function_name = f"extract_{field.type.to_python_varname(self._settings, field_path)}"
-                        code_buffer.write(
+                        struct_code_buffer.write(
                             f'{field_indent}{attrname}={function_name}(data.pop("{mapping_fieldname}")),\n'
                         )
                 elif isinstance(field.type, Literal):
                     function_name = generate_literal_extract_def(field.type, field_path)
-                    code_buffer.write(f'{field_indent}{attrname}={function_name}(data.pop("{mapping_fieldname}")),\n')
+                    value_extract = f'data.pop("{mapping_fieldname}")'
+                    if field.type.has_nullable():
+                        value_extract = f'data.pop("{mapping_fieldname}", None)'
+                    struct_code_buffer.write(f"{field_indent}{attrname}={function_name}({value_extract}),\n")
                 elif isinstance(field.type, Union):
                     function_name = generate_union_extract_def(field.type, field_path)
                     value_extract = f'data.pop("{mapping_fieldname}")'
                     if field.type.has_nullable():
                         value_extract = f'data.pop("{mapping_fieldname}", None)'
-                    code_buffer.write(
+                    struct_code_buffer.write(
                         f"{field_indent}{attrname}={function_name}({value_extract}, check_for_remaining_keys),\n"
                     )
                 elif isinstance(field.type, Structure):
                     function_name = generate_structure_extract_def(field.type, field_path)
-                    code_buffer.write(
+                    struct_code_buffer.write(
                         f'{field_indent}{attrname}={function_name}(data.pop("{mapping_fieldname}"), check_for_remaining_keys),\n'
                     )
                 elif isinstance(field.type, Sequence):
                     function_name = generate_sequence_extract_def(field.type, field_path)
-                    code_buffer.write(
+                    struct_code_buffer.write(
                         f'{field_indent}{attrname}={function_name}(data.pop("{mapping_fieldname}"), check_for_remaining_keys),\n'
                     )
                 else:
                     assert_never(field.type)
-            code_buffer.write("        )\n")
-            code_buffer.write("        if check_for_remaining_keys and len(data) > 0:\n")
-            code_buffer.write("            raise ValueError('remaining field', data)\n")
-            code_buffer.write("        return obj\n")
-            code_buffer.write("\n\n")
+            struct_code_buffer.write("        )\n")
+            struct_code_buffer.write("        if check_for_remaining_keys and len(data) > 0:\n")
+            struct_code_buffer.write("            raise ValueError('remaining field', data)\n")
+            struct_code_buffer.write("        return obj\n")
+            struct_code_buffer.write("\n\n")
+            struct_code_buffer.flush()
+            struct_code_buffer.seek(0)
+            code_buffer.write(struct_code_buffer.read())
         if generate_from_mapping_methods:
             extract_defs = dedent(
                 """\
